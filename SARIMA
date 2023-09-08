@@ -1,0 +1,273 @@
+# Initialize the DataFrame to store SARIMA model results
+df_models_results = pd.DataFrame(columns=['Model', 'Parameters', 'MSE', 'R2', 'RMSE'])
+
+# Data Preprocessing Functions
+
+def check_stationarity(timeseries):
+    """
+    Check if a time series is stationary using the Augmented Dickey-Fuller test.
+    
+    Parameters:
+        timeseries (pd.Series): The time series to test.
+        
+    Returns:
+        bool: True if the time series is stationary, False otherwise.
+    """
+    dftest = adfuller(timeseries, autolag='AIC')
+    return dftest[1] <= 0.05
+
+def differentiate_series(timeseries, seasonal=False, seasonal_periods=1):
+    """
+    Differentiate the time series to make it stationary.
+    
+    Parameters:
+        timeseries (pd.Series): The time series to differentiate.
+        seasonal (bool): Whether to apply seasonal differencing.
+        seasonal_periods (int): The number of periods in a season.
+        
+    Returns:
+        pd.Series: The differentiated time series.
+    """
+    if seasonal:
+        return timeseries.diff(seasonal_periods).dropna()
+    else:
+        return timeseries.diff().dropna()
+
+def preprocess_data(df, target_column, seasonal_periods=1):
+    """
+    Preprocess the time series data to make it suitable for SARIMA modeling.
+    
+    Parameters:
+        df (pd.DataFrame): The data frame containing the time series.
+        target_column (str): The name of the target column.
+        seasonal_periods (int): The number of periods in a season.
+        
+    Returns:
+        pd.Series: The preprocessed time series.
+    """
+    timeseries = df[target_column]
+    
+    if not check_stationarity(timeseries):
+        timeseries = differentiate_series(timeseries)
+        
+    if not check_stationarity(timeseries):
+        timeseries = differentiate_series(timeseries, seasonal=True, seasonal_periods=seasonal_periods)
+    
+    return timeseries.dropna()
+
+# Data Splitting Function
+
+def split_data(df, target_column, split_ratio):
+    """
+    Split the data into training and test sets.
+    
+    Parameters:
+        df (pd.DataFrame): The data frame containing the time series.
+        target_column (str): The name of the target column.
+        split_ratio (float): The ratio of training data to total data.
+        
+    Returns:
+        tuple: Training and test data as pandas Series.
+    """
+    train_size = int(len(df) * split_ratio)
+    train, test = df.iloc[:train_size], df.iloc[train_size:]
+    return train[target_column], test[target_column]
+
+# Parameter Selection Functions
+
+def plot_acf_pacf(timeseries):
+    """
+    Plot Autocorrelation Function (ACF) and Partial Autocorrelation Function (PACF).
+    
+    Parameters:
+        timeseries (pd.Series): The time series data.
+    """
+    plt.figure(figsize=(12,6))
+    plt.subplot(121)
+    plot_acf(timeseries, lags=40, ax=plt.gca())
+    plt.title('Autocorrelation Function')
+    
+    plt.subplot(122)
+    plot_pacf(timeseries, lags=40, ax=plt.gca())
+    plt.title('Partial Autocorrelation Function')
+    plt.tight_layout()
+    
+def find_best_sarima_params(train, seasonal_periods=1, p_values=[0, 1, 2], d_values=[0, 1], q_values=[0, 1, 2],
+                            P_values=[0, 1, 2], D_values=[0, 1], Q_values=[0, 1, 2]):
+    """
+    Find the best SARIMA parameters using grid search.
+    
+    Parameters:
+        train (pd.Series): The training data.
+        seasonal_periods (int): The number of periods in a season.
+        p_values (list): List of AR terms.
+        d_values (list): List of differencing terms.
+        q_values (list): List of MA terms.
+        P_values (list): List of seasonal AR terms.
+        D_values (list): List of seasonal differencing terms.
+        Q_values (list): List of seasonal MA terms.
+        
+    Returns:
+        tuple: The best (p, d, q) and (P, D, Q, S) parameters.
+    """
+    best_score = float('inf')
+    best_params = None
+    best_seasonal_params = None
+    
+    for p in p_values:
+        for d in d_values:
+            for q in q_values:
+                for P in P_values:
+                    for D in D_values:
+                        for Q in Q_values:
+                            try:
+                                model = SARIMAX(train, order=(p, d, q), seasonal_order=(P, D, Q, seasonal_periods))
+                                model_fit = model.fit()
+                                mse = mean_squared_error(train, model_fit.fittedvalues)
+                                if mse < best_score:
+                                    best_score = mse
+                                    best_params = (p, d, q)
+                                    best_seasonal_params = (P, D, Q, seasonal_periods)
+                            except:
+                                continue
+    return best_params, best_seasonal_params
+
+# Model Training and Evaluation Functions
+
+def evaluate_model(actual, predicted):
+    """
+    Evaluate the model using MSE, R2, and RMSE metrics.
+    
+    Parameters:
+        actual (pd.Series): The actual values.
+        predicted (pd.Series): The predicted values.
+        
+    Returns:
+        dict: Dictionary containing MSE, R2, and RMSE.
+    """
+    return {
+        'MSE': mean_squared_error(actual, predicted),
+        'R2': r2_score(actual, predicted),
+        'RMSE': sqrt(mean_squared_error(actual, predicted))
+    }
+
+def train_and_evaluate_sarima(train, test, order, seasonal_order, df_models_results):
+    """
+    Train and evaluate the SARIMA model.
+    
+    Parameters:
+        train (pd.Series): The training data.
+        test (pd.Series): The test data.
+        order (tuple): The order of the SARIMA model (p, d, q).
+        seasonal_order (tuple): The seasonal order of the SARIMA model (P, D, Q, S).
+        df_models_results (pd.DataFrame): DataFrame to store model evaluation results.
+        
+    Returns:
+        pd.DataFrame: Updated DataFrame containing the evaluation metrics.
+    """
+    try:
+        model = SARIMAX(train, order=order, seasonal_order=seasonal_order)
+        model_fit = model.fit()
+        predictions = model_fit.forecast(steps=len(test))
+        
+        plt.figure(figsize=(12, 6))
+        plt.plot(train.index, train, label='Training Data')
+        plt.plot(test.index, test, label='Test Data')
+        plt.plot(test.index, predictions, label='Predictions')
+        plt.legend()
+        plt.title(f'SARIMA Model: {order}, Seasonal: {seasonal_order}')
+        plt.show()
+        
+        metrics = evaluate_model(test, predictions)
+        new_row = {
+            'Model': f'SARIMA{order}{seasonal_order}',
+            'Parameters': f'Order: {order}, Seasonal: {seasonal_order}',
+            'MSE': metrics['MSE'],
+            'R2': metrics['R2'],
+            'RMSE': metrics['RMSE']
+        }
+        df_models_results = df_models_results.append(new_row, ignore_index=True)
+        
+        return df_models_results
+    except Exception as e:
+        print(f'An error occurred: {e}')
+        return df_models_results
+
+# Time Series Cross-Validation and Hyperparameter Tuning
+
+def time_series_cv(train, order, seasonal_order, n_splits=5):
+    """
+    Perform Time Series Cross-Validation.
+    
+    Parameters:
+        train (pd.Series): The training data.
+        order (tuple): The order of the SARIMA model.
+        seasonal_order (tuple): The seasonal order of the SARIMA model.
+        n_splits (int): The number of splits for cross-validation.
+        
+    Returns:
+        float: The average RMSE over all folds.
+    """
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    cv_scores = []
+    
+    for train_index, test_index in tscv.split(train):
+        cv_train, cv_test = train.iloc[train_index], train.iloc[test_index]
+        model = SARIMAX(cv_train, order=order, seasonal_order=seasonal_order)
+        model_fit = model.fit()
+        predictions = model_fit.forecast(steps=len(cv_test))
+        metrics = evaluate_model(cv_test, predictions)
+        cv_scores.append(metrics['RMSE'])
+    
+    return np.mean(cv_scores)
+
+# Main Function
+
+def run_sarima_and_evaluate(df, target_column, split_ratio=0.8, seasonal_periods=1, perform_cv=False,
+                            optimize_params=False, p_values=[0, 1, 2], d_values=[0, 1], q_values=[0, 1, 2],
+                            P_values=[0, 1, 2], D_values=[0, 1], Q_values=[0, 1, 2], n_cv_splits=5):
+    """
+    Main function to run SARIMA model and evaluate its performance.
+    
+    Parameters:
+        df (pd.DataFrame): The data frame containing the time series.
+        target_column (str): The name of the target column.
+        split_ratio (float): The ratio of training data to total data.
+        seasonal_periods (int): The number of periods in a season.
+        perform_cv (bool): Whether to perform Time Series Cross-Validation.
+        optimize_params (bool): Whether to perform grid search to find the best parameters.
+        p_values, d_values, q_values, P_values, D_values, Q_values: Lists of parameter values for grid search.
+        n_cv_splits (int): The number of splits for cross-validation.
+        
+    Returns:
+        pd.DataFrame: DataFrame containing the evaluation metrics or None if an exception occurs.
+    """
+    global df_models_results
+    try:
+        # Data Preprocessing
+        processed_data = preprocess_data(df, target_column, seasonal_periods)
+        
+        # Data Splitting
+        train, test = split_data(df, target_column, split_ratio)
+        
+        # Parameter Selection
+        if optimize_params:
+            order, seasonal_order = find_best_sarima_params(train, seasonal_periods, p_values, d_values, q_values,
+                                                           P_values, D_values, Q_values)
+        else:
+            plot_acf_pacf(train)
+            order = tuple(map(int, input('Enter the order (p, d, q): ').split(',')))
+            seasonal_order = tuple(map(int, input(f'Enter the seasonal order (P, D, Q, {seasonal_periods}): ').split(',')))
+        
+        # Model Training and Evaluation
+        df_models_results = train_and_evaluate_sarima(train, test, order, seasonal_order, df_models_results)
+        
+        # Time Series Cross-Validation
+        if perform_cv:
+            avg_rmse = time_series_cv(train, order, seasonal_order, n_splits=n_cv_splits)
+            print(f'Average RMSE from Time Series Cross-Validation: {avg_rmse}')
+        
+        return df_models_results
+    except Exception as e:
+        print(f'An error occurred: {e}')
+        return None
