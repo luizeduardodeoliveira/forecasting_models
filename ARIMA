@@ -1,0 +1,140 @@
+def check_stationarity(timeseries):
+    """
+    Check if a time series is stationary using the Augmented Dickey-Fuller test.
+    
+    Parameters:
+        timeseries (pd.Series): The time series to test.
+        
+    Returns:
+        bool: True if the time series is stationary, False otherwise.
+    """
+    dftest = adfuller(timeseries, autolag='AIC')
+    return dftest[1] <= 0.05
+
+def differentiate_series(train):
+    """
+    Differentiate the time series to make it stationary.
+    
+    Parameters:
+        train (pd.Series): The time series to differentiate.
+        
+    Returns:
+        pd.Series: The differentiated time series.
+    """
+    return train.diff().dropna()
+
+def split_data(df, target_column, split_ratio):
+    """
+    Split the data into training and test sets.
+    
+    Parameters:
+        df (pd.DataFrame): The data frame containing the time series.
+        target_column (str): The name of the target column.
+        split_ratio (float): The ratio of training data to total data.
+        
+    Returns:
+        tuple: Training and test data as pandas Series.
+    """
+    train_size = int(len(df) * split_ratio)
+    train, test = df.iloc[:train_size], df.iloc[train_size:]
+    return train[target_column], test[target_column]
+
+def evaluate_model(actual, predicted):
+    """
+    Evaluate the model using MSE, R2, and RMSE metrics.
+    
+    Parameters:
+        actual (pd.Series): The actual values.
+        predicted (pd.Series): The predicted values.
+        
+    Returns:
+        dict: Dictionary containing MSE, R2, and RMSE.
+    """
+    return {
+        'MSE': mean_squared_error(actual, predicted),
+        'R2': r2_score(actual, predicted),
+        'RMSE': sqrt(mean_squared_error(actual, predicted))
+    }
+
+def time_series_cv(train, order):
+    """
+    Perform Time Series Cross-Validation.
+    
+    Parameters:
+        train (pd.Series): The training data.
+        order (tuple): The order of the ARIMA model.
+        
+    Returns:
+        float: The average RMSE over all folds.
+    """
+    tscv = TimeSeriesSplit(n_splits=5)
+    cv_scores = []
+
+    for train_index, test_index in tscv.split(train):
+        cv_train, cv_test = train.iloc[train_index], train.iloc[test_index]
+        model = ARIMA(cv_train, order=order)
+        model_fit = model.fit()
+        predictions = model_fit.forecast(steps=len(cv_test))
+        metrics = evaluate_model(cv_test, predictions)
+        cv_scores.append(metrics['RMSE'])
+    
+    return np.mean(cv_scores)
+
+def run_arima_and_evaluate(df, target_column, order=None, split_ratio=0.8, perform_cv=False, optimize_params=False):
+    """
+    Main function to run ARIMA model and evaluate its performance.
+    
+    Parameters:
+        df (pd.DataFrame): The data frame containing the time series.
+        target_column (str): The name of the target column.
+        order (tuple, optional): The order of the ARIMA model.
+        split_ratio (float, optional): The ratio of training data to total data.
+        perform_cv (bool, optional): Whether to perform Time Series Cross-Validation.
+        optimize_params (bool, optional): Whether to perform grid search to find the best parameters.
+        
+    Returns:
+        pd.DataFrame: Data frame containing the evaluation metrics or None if an exception occurs.
+    """
+    try:
+        arima_results_df = pd.DataFrame(columns=['Model', 'MSE', 'R2', 'RMSE'])
+        train, test = split_data(df, target_column, split_ratio)
+
+        if not check_stationarity(train):
+            train = differentiate_series(train)
+            if order:
+                order = (order[0], order[1] + 1, order[2])
+
+        train.dropna(inplace=True)
+        
+        if optimize_params:
+            p_values = [0, 1, 2]
+            d_values = [0, 1]
+            q_values = [0, 1, 2]
+            order = arima_grid_search(train, p_values, d_values, q_values)
+        
+        model = ARIMA(train, order=order)
+        model_fit = model.fit()
+        predictions = model_fit.forecast(steps=len(test))
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(df.index, df[target_column], label='Original Series')
+        plt.plot(train.index, train, label='Training Set')
+        plt.plot(test.index, predictions, label='Predictions')
+        plt.legend()
+        plt.title('ARIMA Model')
+        plt.show()
+
+        metrics = evaluate_model(test, predictions)
+        new_row = {'Model': f'ARIMA{order}', 'MSE': metrics['MSE'], 'R2': metrics['R2'], 'RMSE': metrics['RMSE']}
+        arima_results_df = arima_results_df.append(new_row, ignore_index=True)
+
+        if perform_cv:
+            avg_rmse = time_series_cv(train, order)
+            print(f'Time Series CV Average RMSE: {avg_rmse}')
+            
+        return arima_results_df
+
+    except Exception as e:
+        with open('arima_error_log.txt', 'a') as f:
+            f.write(f'An error occurred: {e}\n')
+        return None
